@@ -1,0 +1,86 @@
+CREATE OR REPLACE FUNCTION envers_audit_func()
+RETURNS trigger LANGUAGE PLPGSQL AS $BODY$
+
+DECLARE
+cursorTabelaAuditadas cursor for 
+	select ta.table_name from information_schema."tables" ta
+	where ta.table_name like '%_aud';
+	
+recCursorTabelaAuditadas record;
+
+cursorColunasTabela refCursor; 
+recCursorColunasTabela record;
+
+cursorNovaColuna refCursor;
+recCursorNovaColuna record;
+
+cursorAntigaColuna refCursor;
+recCursorAntigaColuna record;
+
+BEGIN
+
+open cursorTabelaAuditadas;
+loop
+	fetch cursorTabelaAuditadas into recCursorTabelaAuditadas;
+		exit when not found;
+		--RAISE NOTICE 'Row read. Data: % ', recCursorTabelaAuditadas.table_name;
+			
+		OPEN cursorColunasTabela FOR EXECUTE 'select co.column_name 
+												from information_schema.columns co 
+												where co.table_name = ''' || recCursorTabelaAuditadas.table_name || '''
+												and co.column_name not in (''rev'', ''revtype'')
+												and 0 < (select count(*) from ' || recCursorTabelaAuditadas.table_name || ' where rev = '|| NEW.REV ||')';
+
+		LOOP
+		FETCH cursorColunasTabela INTO recCursorColunasTabela;
+		exit when not found;
+		RAISE NOTICE 'Coluna: % ', recCursorColunasTabela.column_name;
+		
+			--INSERÇÃO DE VALORES
+		
+			OPEN cursorNovaColuna FOR EXECUTE 'select CAST('||recCursorColunasTabela.column_name||' AS VARCHAR) AS NEW, revtype AS TIPO_OPERACAO, id_auditoria from '||recCursorTabelaAuditadas.table_name||' where rev = ' || NEW.REV;
+			LOOP
+			FETCH NEXT FROM cursorNovaColuna INTO recCursorNovaColuna;
+			exit when not found;
+			
+				IF recCursorNovaColuna.TIPO_OPERACAO = 0 THEN
+					RAISE NOTICE 'NOVO VALOR: % ', recCursorNovaColuna.NEW;
+					IF recCursorNovaColuna.NEW IS NOT NULL THEN
+						INSERT INTO public.auditoria(
+						dt_cadastrado, tabela, campo, valor_antigo, valor_novo, usuario, rev, operacao)
+						VALUES (now(), recCursorTabelaAuditadas.table_name, recCursorColunasTabela.column_name, '', recCursorNovaColuna.NEW, 'teste', NEW.REV, recCursorNovaColuna.TIPO_OPERACAO);
+					END IF;
+				ELSIF recCursorNovaColuna.TIPO_OPERACAO = 1 THEN
+				
+				--ATUALIZAÇÃO DE VALORES
+				
+				OPEN cursorAntigaColuna FOR EXECUTE 'select CAST(valor_novo AS VARCHAR) AS valor_antigo from auditoria aud 
+													Where campo = '''|| recCursorColunasTabela.column_name ||'''
+													AND aud.rev = (SELECT max(aud2.rev) FROM auditoria aud2 WHERE
+													aud2.valor_novo = '''||recCursorNovaColuna.id_auditoria||'''
+													AND aud2.rev <> '|| NEW.REV ||')';
+													
+				LOOP --LOOP PARA ATUALIZAÇÃO DE VALORES
+					FETCH NEXT FROM cursorAntigaColuna INTO recCursorAntigaColuna;
+					exit when not found;
+					IF recCursorAntigaColuna.valor_antigo <> recCursorNovaColuna.NEW THEN
+						INSERT INTO public.auditoria(
+						dt_cadastrado, tabela, campo, valor_antigo, valor_novo, usuario, rev, operacao)
+						VALUES (now(), recCursorTabelaAuditadas.table_name, recCursorColunasTabela.column_name, recCursorAntigaColuna.valor_antigo, recCursorNovaColuna.NEW, 'teste', NEW.REV, recCursorNovaColuna.TIPO_OPERACAO);
+					END IF;
+				END LOOP;
+				CLOSE  cursorAntigaColuna;
+				
+				END IF;
+				
+			END LOOP;
+			CLOSE  cursorNovaColuna;
+		
+		END LOOP;
+		CLOSE  cursorColunasTabela;
+
+END LOOP;
+CLOSE cursorTabelaAuditadas;
+RETURN NEW;
+END;
+$BODY$;
